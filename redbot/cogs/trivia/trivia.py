@@ -57,7 +57,7 @@ class Trivia(commands.Cog):
             settings_dict = await settings.all()
             msg = box(
                 _(
-                    "**Current settings**\n"
+                    "Current settings\n"
                     "Bot gains points: {bot_plays}\n"
                     "Answer time limit: {delay} seconds\n"
                     "Lack of response timeout: {timeout} seconds\n"
@@ -267,18 +267,19 @@ class Trivia(commands.Cog):
             else:
                 await ctx.send(msg)
 
-    @trivia.group(name="leaderboard", aliases=["lboard"], autohelp=False)
+    @trivia.group(
+        name="leaderboard", aliases=["lboard"], autohelp=False, invoke_without_command=True
+    )
     async def trivia_leaderboard(self, ctx: commands.Context):
         """Leaderboard for trivia.
 
         Defaults to the top 10 of this server, sorted by total wins. Use
         subcommands for a more customised leaderboard.
         """
-        if ctx.invoked_subcommand == self.trivia_leaderboard:
-            cmd = self.trivia_leaderboard_server
-            if isinstance(ctx.channel, discord.abc.PrivateChannel):
-                cmd = self.trivia_leaderboard_global
-            await ctx.invoke(cmd, "wins", 10)
+        cmd = self.trivia_leaderboard_server
+        if isinstance(ctx.channel, discord.abc.PrivateChannel):
+            cmd = self.trivia_leaderboard_global
+        await ctx.invoke(cmd, "wins", 10)
 
     @trivia_leaderboard.command(name="server")
     @commands.guild_only()
@@ -444,6 +445,7 @@ class Trivia(commands.Cog):
                 break
         return "\n".join(lines)
 
+    @commands.Cog.listener()
     async def on_trivia_end(self, session: TriviaSession):
         """Event for a trivia session ending.
 
@@ -520,7 +522,7 @@ class Trivia(commands.Cog):
 
         return personal_lists + get_core_lists()
 
-    def __unload(self):
+    def cog_unload(self):
         for session in self.trivia_sessions:
             session.force_stop()
 

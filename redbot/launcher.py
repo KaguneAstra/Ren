@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 
 import pkg_resources
+from redbot import MIN_PYTHON_VERSION
 from redbot.setup import (
     basic_setup,
     load_existing_config,
@@ -19,7 +20,7 @@ from redbot.core import __version__, version_info as red_version_info, VersionIn
 from redbot.core.cli import confirm
 
 if sys.platform == "linux":
-    import distro
+    import distro  # pylint: disable=import-error
 
 INTERACTIVE_MODE = not len(sys.argv) > 1  # CLI flags = non-interactive
 
@@ -27,12 +28,6 @@ INTRO = "==========================\nRed Discord Bot - Launcher\n===============
 
 IS_WINDOWS = os.name == "nt"
 IS_MAC = sys.platform == "darwin"
-
-if IS_WINDOWS:
-    # Due to issues with ProactorEventLoop prior to 3.6.6 (bpo-26819)
-    MIN_PYTHON_VERSION = (3, 6, 6)
-else:
-    MIN_PYTHON_VERSION = (3, 6, 2)
 
 PYTHON_OK = sys.version_info >= MIN_PYTHON_VERSION
 
@@ -66,13 +61,10 @@ def parse_cli_args():
     parser.add_argument(
         "--update-dev", help="Updates Red from the Github repo", action="store_true"
     )
-    parser.add_argument(
-        "--voice", help="Installs extra 'voice' when updating", action="store_true"
-    )
     parser.add_argument("--docs", help="Installs extra 'docs' when updating", action="store_true")
     parser.add_argument("--test", help="Installs extra 'test' when updating", action="store_true")
     parser.add_argument(
-        "--mongo", help="Installs extra 'mongo' when updating", action="store_true"
+        "--style", help="Installs extra 'style' when updating", action="store_true"
     )
     parser.add_argument(
         "--debuginfo",
@@ -82,7 +74,7 @@ def parse_cli_args():
     return parser.parse_known_args()
 
 
-def update_red(dev=False, voice=False, mongo=False, docs=False, test=False):
+def update_red(dev=False, style=False, docs=False, test=False):
     interpreter = sys.executable
     print("Updating Red...")
     # If the user ran redbot-launcher.exe, updating with pip will fail
@@ -99,10 +91,8 @@ def update_red(dev=False, voice=False, mongo=False, docs=False, test=False):
             os.remove(new_name)
         os.rename(old_name, new_name)
     egg_l = []
-    if voice:
-        egg_l.append("voice")
-    if mongo:
-        egg_l.append("mongo")
+    if style:
+        egg_l.append("style")
     if docs:
         egg_l.append("docs")
     if test:
@@ -259,7 +249,7 @@ async def reset_red():
         "please select option 5 in the launcher."
     )
     await asyncio.sleep(2)
-    print("\nIf you continue you will remove these instanes.\n")
+    print("\nIf you continue you will remove these instances.\n")
     for instance in list(instances.keys()):
         print("    - {}".format(instance))
     await asyncio.sleep(3)
@@ -269,14 +259,14 @@ async def reset_red():
         print("Cancelling...")
         return
 
-    if confirm("\nDo you want to create a backup for an instance? (y/n) "):
+    if confirm("\nDo you want to create a backup for an instance?"):
         for index, instance in instances.items():
             print("\nRemoving {}...".format(index))
-            await create_backup(index, instance)
-            await remove_instance(index, instance)
+            await create_backup(index)
+            await remove_instance(index)
     else:
         for index, instance in instances.items():
-            await remove_instance(index, instance)
+            await remove_instance(index)
     print("All instances have been removed.")
 
 
@@ -298,7 +288,7 @@ def user_choice():
 
 def extras_selector():
     print("Enter any extra requirements you want installed\n")
-    print("Options are: voice, docs, test, mongo\n")
+    print("Options are: style, docs, test\n")
     selected = user_choice()
     selected = selected.split()
     return selected
@@ -320,20 +310,18 @@ def development_choice(can_go_back=True):
             selected = extras_selector()
             update_red(
                 dev=False,
-                voice=True if "voice" in selected else False,
+                style=True if "style" in selected else False,
                 docs=True if "docs" in selected else False,
                 test=True if "test" in selected else False,
-                mongo=True if "mongo" in selected else False,
             )
             break
         elif choice == "2":
             selected = extras_selector()
             update_red(
                 dev=True,
-                voice=True if "voice" in selected else False,
+                style=True if "style" in selected else False,
                 docs=True if "docs" in selected else False,
                 test=True if "test" in selected else False,
-                mongo=True if "mongo" in selected else False,
             )
             break
         elif choice == "0" and can_go_back:
@@ -452,11 +440,13 @@ def main_menu():
 
 
 def main():
+    args, flags_to_pass = parse_cli_args()
     if not PYTHON_OK:
         print(
-            f"Python {'.'.join(map(str, MIN_PYTHON_VERSION))} is required to run Red, but you "
-            f"have {sys.version}! Please update Python."
-        )
+            "Python {req_ver} is required to run Red, but you have {sys_ver}!".format(
+                req_ver=".".join(map(str, MIN_PYTHON_VERSION)), sys_ver=sys.version
+            )
+        )  # Don't make an f-string, these may not exist on the python version being rejected!
         sys.exit(1)
     if args.debuginfo:  # Check first since the function triggers an exit
         debug_info()
@@ -467,9 +457,9 @@ def main():
             "Please try again using only one of --update or --update-dev"
         )
     if args.update:
-        update_red(voice=args.voice, docs=args.docs, test=args.test, mongo=args.mongo)
+        update_red(style=args.style, docs=args.docs, test=args.test)
     elif args.update_dev:
-        update_red(dev=True, voice=args.voice, docs=args.docs, test=args.test, mongo=args.mongo)
+        update_red(dev=True, style=args.style, docs=args.docs, test=args.test)
 
     if INTERACTIVE_MODE:
         main_menu()
@@ -477,8 +467,6 @@ def main():
         print("Starting Red...")
         run_red(args.instancename, autorestart=args.auto_restart, cliflags=flags_to_pass)
 
-
-args, flags_to_pass = parse_cli_args()
 
 if __name__ == "__main__":
     try:

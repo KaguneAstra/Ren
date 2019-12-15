@@ -1,9 +1,13 @@
 import itertools
-from typing import Sequence, Iterator, List
+import datetime
+from typing import Sequence, Iterator, List, Optional, Union, SupportsInt
+from io import BytesIO
+
 
 import discord
+from babel.numbers import format_decimal
 
-from redbot.core.i18n import Translator
+from redbot.core.i18n import Translator, get_babel_locale
 
 _ = Translator("UtilsChatFormatting", __file__)
 
@@ -204,7 +208,7 @@ def pagify(
     priority: bool = False,
     escape_mass_mentions: bool = True,
     shorten_by: int = 8,
-    page_length: int = 2000
+    page_length: int = 2000,
 ) -> Iterator[str]:
     """Generate multiple pages from the given text.
 
@@ -343,6 +347,11 @@ def humanize_list(items: Sequence[str]) -> str:
     items : Sequence[str]
         The items of the list to join together.
 
+    Raises
+    ------
+    IndexError
+        An empty sequence was passed
+
     Examples
     --------
     .. testsetup::
@@ -359,7 +368,10 @@ def humanize_list(items: Sequence[str]) -> str:
     """
     if len(items) == 1:
         return items[0]
-    return ", ".join(items[:-1]) + _(", and ") + items[-1]
+    try:
+        return ", ".join(items[:-1]) + _(", and ") + items[-1]
+    except IndexError:
+        raise IndexError("Cannot humanize empty sequence") from None
 
 
 def format_perms_list(perms: discord.Permissions) -> str:
@@ -386,3 +398,105 @@ def format_perms_list(perms: discord.Permissions) -> str:
             perm_name = '"' + perm.replace("_", " ").title() + '"'
             perm_names.append(perm_name)
     return humanize_list(perm_names).replace("Guild", "Server")
+
+
+def humanize_timedelta(
+    *, timedelta: Optional[datetime.timedelta] = None, seconds: Optional[SupportsInt] = None
+) -> str:
+    """
+    Get a locale aware human timedelta representation.
+
+    This works with either a timedelta object or a number of seconds.
+
+    Fractional values will be omitted, and values less than 1 second
+    an empty string.
+
+    Parameters
+    ----------
+    timedelta: Optional[datetime.timedelta]
+        A timedelta object
+    seconds: Optional[SupportsInt]
+        A number of seconds
+
+    Returns
+    -------
+    str
+        A locale aware representation of the timedelta or seconds.
+
+    Raises
+    ------
+    ValueError
+        The function was called with neither a number of seconds nor a timedelta object
+    """
+
+    try:
+        obj = seconds or timedelta.total_seconds()
+    except AttributeError:
+        raise ValueError("You must provide either a timedelta or a number of seconds")
+
+    seconds = int(obj)
+    periods = [
+        (_("year"), _("years"), 60 * 60 * 24 * 365),
+        (_("month"), _("months"), 60 * 60 * 24 * 30),
+        (_("day"), _("days"), 60 * 60 * 24),
+        (_("hour"), _("hours"), 60 * 60),
+        (_("minute"), _("minutes"), 60),
+        (_("second"), _("seconds"), 1),
+    ]
+
+    strings = []
+    for period_name, plural_period_name, period_seconds in periods:
+        if seconds >= period_seconds:
+            period_value, seconds = divmod(seconds, period_seconds)
+            if period_value == 0:
+                continue
+            unit = plural_period_name if period_value > 1 else period_name
+            strings.append(f"{period_value} {unit}")
+
+    return ", ".join(strings)
+
+
+def humanize_number(val: Union[int, float], override_locale=None) -> str:
+    """
+    Convert an int or float to a str with digit separators based on bot locale
+
+    Parameters
+    ----------
+    val : Union[int, float]
+        The int/float to be formatted.
+    override_locale: Optional[str]
+        A value to override the bots locale.
+
+    Returns
+    -------
+    str
+        locale aware formatted number.
+    """
+    return format_decimal(val, locale=get_babel_locale(override_locale))
+
+
+def text_to_file(
+    text: str, filename: str = "file.txt", *, spoiler: bool = False, encoding: str = "utf-8"
+):
+    """Prepares text to be sent as a file on Discord, without character limit.
+
+    This writes text into a bytes object that can be used for the ``file`` or ``files`` parameters
+    of :meth:`discord.abc.Messageable.send`.
+
+    Parameters
+    ----------
+    text: str
+        The text to put in your file.
+    filename: str
+        The name of the file sent. Defaults to ``file.txt``.
+    spoiler: bool
+        Whether the attachment is a spoiler. Defaults to ``False``.
+
+    Returns
+    -------
+    discord.File
+        The file containing your text.
+
+    """
+    file = BytesIO(text.encode(encoding))
+    return discord.File(file, filename, spoiler=spoiler)

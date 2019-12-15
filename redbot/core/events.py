@@ -4,8 +4,8 @@ import codecs
 import datetime
 import logging
 import traceback
+import asyncio
 from datetime import timedelta
-from typing import List
 
 import aiohttp
 import discord
@@ -13,86 +13,39 @@ import pkg_resources
 from colorama import Fore, Style, init
 from pkg_resources import DistributionNotFound
 
-from . import __version__ as red_version, version_info as red_version_info, VersionInfo, commands
+from redbot.core.commands import RedHelpFormatter
+from .. import __version__ as red_version, version_info as red_version_info, VersionInfo
+from . import commands
+from .config import get_latest_confs
 from .data_manager import storage_type
-from .utils.chat_formatting import inline, bordered, format_perms_list
+from .utils.chat_formatting import inline, bordered, format_perms_list, humanize_timedelta
 from .utils import fuzzy_command_search, format_fuzzy_results
 
 log = logging.getLogger("red")
-sentry_log = logging.getLogger("red.sentry")
 init()
 
 INTRO = """
-______         _           ______ _                       _  ______       _   
-| ___ \       | |          |  _  (_)                     | | | ___ \     | |  
-| |_/ /___  __| |  ______  | | | |_ ___  ___ ___  _ __ __| | | |_/ / ___ | |_ 
+______         _           ______ _                       _  ______       _
+| ___ \       | |          |  _  (_)                     | | | ___ \     | |
+| |_/ /___  __| |  ______  | | | |_ ___  ___ ___  _ __ __| | | |_/ / ___ | |_
 |    // _ \/ _` | |______| | | | | / __|/ __/ _ \| '__/ _` | | ___ \/ _ \| __|
-| |\ \  __/ (_| |          | |/ /| \__ \ (_| (_) | | | (_| | | |_/ / (_) | |_ 
+| |\ \  __/ (_| |          | |/ /| \__ \ (_| (_) | | | (_| | | |_/ / (_) | |_
 \_| \_\___|\__,_|          |___/ |_|___/\___\___/|_|  \__,_| \____/ \___/ \__|
 """
-
-
-def should_log_sentry(exception) -> bool:
-    e = exception
-    while e.__cause__ is not None:
-        e = e.__cause__
-
-    tb = e.__traceback__
-    tb_frame = None
-    while tb is not None:
-        tb_frame = tb.tb_frame
-        tb = tb.tb_next
-
-    module = tb_frame.f_globals.get("__name__")
-    return module is not None and module.startswith("redbot")
 
 
 def init_events(bot, cli_flags):
     @bot.event
     async def on_connect():
-        if bot.uptime is None:
+        if bot._uptime is None:
             print("Connected to Discord. Getting ready...")
 
     @bot.event
     async def on_ready():
-        if bot.uptime is not None:
+        if bot._uptime is not None:
             return
 
-        bot.uptime = datetime.datetime.utcnow()
-        packages = []
-
-        if cli_flags.no_cogs is False:
-            packages.extend(await bot.db.packages())
-
-        if cli_flags.load_cogs:
-            packages.extend(cli_flags.load_cogs)
-
-        if packages:
-            # Load permissions first, for security reasons
-            try:
-                packages.remove("permissions")
-            except ValueError:
-                pass
-            else:
-                packages.insert(0, "permissions")
-
-            to_remove = []
-            print("Loading packages...")
-            for package in packages:
-                try:
-                    spec = await bot.cog_mgr.find_cog(package)
-                    await bot.load_extension(spec)
-                except Exception as e:
-                    log.exception("Failed to load package {}".format(package), exc_info=e)
-                    await bot.remove_loaded_package(package)
-                    to_remove.append(package)
-            for package in to_remove:
-                packages.remove(package)
-            if packages:
-                print("Loaded packages: " + ", ".join(packages))
-
-        if bot.rpc_enabled:
-            await bot.rpc.initialize()
+        bot._uptime = datetime.datetime.utcnow()
 
         guilds = len(bot.guilds)
         users = len(set([m for m in bot.get_all_members()]))
@@ -103,8 +56,8 @@ def init_events(bot, cli_flags):
         except:
             invite_url = "Could not fetch invite url"
 
-        prefixes = cli_flags.prefix or (await bot.db.prefix())
-        lang = await bot.db.locale()
+        prefixes = cli_flags.prefix or (await bot._config.prefix())
+        lang = await bot._config.locale()
         red_pkg = pkg_resources.get_distribution("Red-DiscordBot")
         dpy_version = discord.__version__
 
@@ -133,8 +86,8 @@ def init_events(bot, cli_flags):
                     "Outdated version! {} is available "
                     "but you're using {}".format(data["info"]["version"], red_version)
                 )
-                owner = await bot.get_user_info(bot.owner_id)
-                await owner.send(
+
+                await bot.send_to_owners(
                     "Your Red instance is out of date! {} is the current "
                     "version, however you are using {}!".format(
                         data["info"]["version"], red_version
@@ -142,9 +95,7 @@ def init_events(bot, cli_flags):
                 )
         INFO2 = []
 
-        sentry = await bot.db.enable_sentry()
-        mongo_enabled = storage_type() != "JSON"
-        reqs_installed = {"voice": None, "docs": None, "test": None}
+        reqs_installed = {"docs": None, "test": None}
         for key in reqs_installed.keys():
             reqs = [x.name for x in red_pkg._dep_map[key]]
             try:
@@ -155,9 +106,7 @@ def init_events(bot, cli_flags):
                 reqs_installed[key] = True
 
         options = (
-            ("Error Reporting", sentry),
-            ("MongoDB", mongo_enabled),
-            ("Voice", reqs_installed["voice"]),
+            ("Voice", True),
             ("Docs", reqs_installed["docs"]),
             ("Tests", reqs_installed["test"]),
         )
@@ -175,58 +124,61 @@ def init_events(bot, cli_flags):
         if invite_url:
             print("\nInvite URL: {}\n".format(invite_url))
 
-        bot.color = discord.Colour(await bot.db.color())
-        try:
-            import Levenshtein
-        except ImportError:
-            log.info(
-                "python-Levenshtein is not installed, fuzzy string matching will be a bit slower."
-            )
+        bot._color = discord.Colour(await bot._config.color())
 
     @bot.event
-    async def on_error(event_method, *args, **kwargs):
-        sentry_log.exception("Exception in {}".format(event_method))
+    async def on_command_error(ctx, error, unhandled_by_cog=False):
 
-    @bot.event
-    async def on_command_error(ctx, error):
+        if not unhandled_by_cog:
+            if hasattr(ctx.command, "on_error"):
+                return
+
+            if ctx.cog:
+                if commands.Cog._get_overridden_method(ctx.cog.cog_command_error) is not None:
+                    return
+
         if isinstance(error, commands.MissingRequiredArgument):
             await ctx.send_help()
+        elif isinstance(error, commands.ArgParserFailure):
+            msg = f"`{error.user_input}` is not a valid value for `{error.cmd}`"
+            if error.custom_help_msg:
+                msg += f"\n{error.custom_help_msg}"
+            await ctx.send(msg)
+            if error.send_cmd_help:
+                await ctx.send_help()
         elif isinstance(error, commands.ConversionFailure):
             if error.args:
                 await ctx.send(error.args[0])
             else:
                 await ctx.send_help()
-        elif isinstance(error, commands.BadArgument):
+        elif isinstance(error, commands.UserInputError):
             await ctx.send_help()
         elif isinstance(error, commands.DisabledCommand):
-            disabled_message = await bot.db.disabled_command_msg()
+            disabled_message = await bot._config.disabled_command_msg()
             if disabled_message:
                 await ctx.send(disabled_message.replace("{command}", ctx.invoked_with))
         elif isinstance(error, commands.CommandInvokeError):
             log.exception(
-                "Exception in command '{}'" "".format(ctx.command.qualified_name),
+                "Exception in command '{}'".format(ctx.command.qualified_name),
                 exc_info=error.original,
             )
-            if should_log_sentry(error):
-                sentry_log.exception(
-                    "Exception in command '{}'" "".format(ctx.command.qualified_name),
-                    exc_info=error.original,
-                )
 
-            message = (
-                "Error in command '{}'. Check your console or "
-                "logs for details."
-                "".format(ctx.command.qualified_name)
+            message = "Error in command '{}'. Check your console or logs for details.".format(
+                ctx.command.qualified_name
             )
             exception_log = "Exception in command '{}'\n" "".format(ctx.command.qualified_name)
             exception_log += "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
             )
             bot._last_exception = exception_log
-            if not hasattr(ctx.cog, "_{0.command.cog_name}__error".format(ctx)):
-                await ctx.send(inline(message))
+            await ctx.send(inline(message))
         elif isinstance(error, commands.CommandNotFound):
-            fuzzy_commands = await fuzzy_command_search(ctx)
+            fuzzy_commands = await fuzzy_command_search(
+                ctx,
+                commands={
+                    c async for c in RedHelpFormatter.help_filter_func(ctx, bot.walk_commands())
+                },
+            )
             if not fuzzy_commands:
                 pass
             elif await ctx.embed_requested():
@@ -243,63 +195,55 @@ def init_events(bot, cli_flags):
                     perms=format_perms_list(error.missing), plural=plural
                 )
             )
-        elif isinstance(error, commands.CheckFailure):
-            pass
+        elif isinstance(error, commands.UserFeedbackCheckFailure):
+            if error.message:
+                await ctx.send(error.message)
         elif isinstance(error, commands.NoPrivateMessage):
             await ctx.send("That command is not available in DMs.")
+        elif isinstance(error, commands.PrivateMessageOnly):
+            await ctx.send("That command is only available in DMs.")
+        elif isinstance(error, commands.CheckFailure):
+            pass
         elif isinstance(error, commands.CommandOnCooldown):
             await ctx.send(
-                "This command is on cooldown. Try again in {:.2f}s".format(error.retry_after)
+                "This command is on cooldown. Try again in {}.".format(
+                    humanize_timedelta(seconds=error.retry_after) or "1 second"
+                ),
+                delete_after=error.retry_after,
             )
         else:
             log.exception(type(error).__name__, exc_info=error)
-            try:
-                sentry_error = error.original
-            except AttributeError:
-                sentry_error = error
-
-            if should_log_sentry(sentry_error):
-                sentry_log.exception("Unhandled command error.", exc_info=sentry_error)
 
     @bot.event
     async def on_message(message):
-        bot.counter["messages_read"] += 1
         await bot.process_commands(message)
         discord_now = message.created_at
         if (
-            not bot.checked_time_accuracy
-            or (discord_now - timedelta(minutes=60)) > bot.checked_time_accuracy
+            not bot._checked_time_accuracy
+            or (discord_now - timedelta(minutes=60)) > bot._checked_time_accuracy
         ):
             system_now = datetime.datetime.utcnow()
             diff = abs((discord_now - system_now).total_seconds())
             if diff > 60:
-                log.warn(
-                    "Detected significant difference (%d seconds) in system clock to discord's clock."
-                    " Any time sensitive code may fail.",
+                log.warning(
+                    "Detected significant difference (%d seconds) in system clock to discord's "
+                    "clock. Any time sensitive code may fail.",
                     diff,
                 )
-            bot.checked_time_accuracy = discord_now
-
-    @bot.event
-    async def on_resumed():
-        bot.counter["sessions_resumed"] += 1
-
-    @bot.event
-    async def on_command(command):
-        bot.counter["processed_commands"] += 1
+            bot._checked_time_accuracy = discord_now
 
     @bot.event
     async def on_command_add(command: commands.Command):
-        disabled_commands = await bot.db.disabled_commands()
+        disabled_commands = await bot._config.disabled_commands()
         if command.qualified_name in disabled_commands:
             command.enabled = False
         for guild in bot.guilds:
-            disabled_commands = await bot.db.guild(guild).disabled_commands()
+            disabled_commands = await bot._config.guild(guild).disabled_commands()
             if command.qualified_name in disabled_commands:
                 command.disable_in(guild)
 
     async def _guild_added(guild: discord.Guild):
-        disabled_commands = await bot.db.guild(guild).disabled_commands()
+        disabled_commands = await bot._config.guild(guild).disabled_commands()
         for command_name in disabled_commands:
             command_obj = bot.get_command(command_name)
             if command_obj is not None:
@@ -318,11 +262,19 @@ def init_events(bot, cli_flags):
     @bot.event
     async def on_guild_leave(guild: discord.Guild):
         # Clean up any unneeded checks
-        disabled_commands = await bot.db.guild(guild).disabled_commands()
+        disabled_commands = await bot._config.guild(guild).disabled_commands()
         for command_name in disabled_commands:
             command_obj = bot.get_command(command_name)
             if command_obj is not None:
                 command_obj.enable_in(guild)
+
+    @bot.event
+    async def on_cog_add(cog: commands.Cog):
+        confs = get_latest_confs()
+        for c in confs:
+            uuid = c.unique_identifier
+            group_data = c.custom_groups
+            await bot._config.custom("CUSTOM_GROUPS", c.cog_name, uuid).set(group_data)
 
 
 def _get_startup_screen_specs():

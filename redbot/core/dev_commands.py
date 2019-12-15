@@ -64,11 +64,7 @@ class Dev(commands.Cog):
     def sanitize_output(ctx: commands.Context, input_: str) -> str:
         """Hides the bot's token from a string."""
         token = ctx.bot.http.token
-        r = "[EXPUNGED]"
-        result = input_.replace(token, r)
-        result = result.replace(token.lower(), r)
-        result = result.replace(token.upper(), r)
-        return result
+        return re.sub(re.escape(token), "[EXPUNGED]", input_, re.I)
 
     @commands.command()
     @checks.is_owner()
@@ -120,7 +116,6 @@ class Dev(commands.Cog):
             result = await result
 
         self._last_result = result
-
         result = self.sanitize_output(ctx, str(result))
 
         await ctx.send_interactive(self.get_pages(result), box_lang="py")
@@ -226,7 +221,7 @@ class Dev(commands.Cog):
             cleaned = self.cleanup_code(response.content)
 
             if cleaned in ("quit", "exit", "exit()"):
-                await ctx.send("Exiting.")
+                await ctx.send(_("Exiting."))
                 self.sessions.remove(ctx.channel.id)
                 return
 

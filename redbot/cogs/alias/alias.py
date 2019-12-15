@@ -1,8 +1,10 @@
 from copy import copy
-from re import search
+from re import findall, search
+from string import Formatter
 from typing import Generator, Tuple, Iterable, Optional
 
 import discord
+from discord.ext.commands.view import StringView
 from redbot.core import Config, commands, checks
 from redbot.core.i18n import Translator, cog_i18n
 from redbot.core.utils.chat_formatting import box
@@ -11,6 +13,21 @@ from redbot.core.bot import Red
 from .alias_entry import AliasEntry
 
 _ = Translator("Alias", __file__)
+
+
+class _TrackingFormatter(Formatter):
+    def __init__(self):
+        super().__init__()
+        self.max = -1
+
+    def get_value(self, key, args, kwargs):
+        if isinstance(key, int):
+            self.max = max((key, self.max))
+        return super().get_value(key, args, kwargs)
+
+
+class ArgParseError(Exception):
+    pass
 
 
 @cog_i18n(_)
@@ -72,16 +89,37 @@ class Alias(commands.Cog):
         return False, None
 
     def is_command(self, alias_name: str) -> bool:
+        """
+        The logic here is that if this returns true, the name shouldnt be used for an alias
+        The function name can be changed when alias is reworked
+        """
         command = self.bot.get_command(alias_name)
-        return command is not None
+        return command is not None or alias_name in commands.RESERVED_COMMAND_NAMES
 
     @staticmethod
     def is_valid_alias_name(alias_name: str) -> bool:
         return not bool(search(r"\s", alias_name)) and alias_name.isprintable()
 
     async def add_alias(
-        self, ctx: commands.Context, alias_name: str, command: Tuple[str], global_: bool = False
+        self, ctx: commands.Context, alias_name: str, command: str, global_: bool = False
     ) -> AliasEntry:
+        indices = findall(r"{(\d*)}", command)
+        if indices:
+            try:
+                indices = [int(a[0]) for a in indices]
+            except IndexError:
+                raise ArgParseError(_("Arguments must be specified with a number."))
+            low = min(indices)
+            indices = [a - low for a in indices]
+            high = max(indices)
+            gaps = set(indices).symmetric_difference(range(high + 1))
+            if gaps:
+                raise ArgParseError(
+                    _("Arguments must be sequential. Missing arguments: ")
+                    + ", ".join(str(i + low) for i in gaps)
+                )
+            command = command.format(*(f"{{{i}}}" for i in range(-low, high + low + 1)))
+
         alias = AliasEntry(alias_name, command, ctx.author, global_=global_)
 
         if global_:
@@ -142,7 +180,17 @@ class Alias(commands.Cog):
         :return: 
         """
         known_content_length = len(prefix) + len(alias.name)
-        extra = message.content[known_content_length:].strip()
+        extra = message.content[known_content_length:]
+        view = StringView(extra)
+        view.skip_ws()
+        extra = []
+        while not view.eof:
+            prev = view.index
+            word = view.get_quoted_word()
+            if len(word) < view.index - prev:
+                word = "".join((view.buffer[prev], word, view.buffer[view.index - 1]))
+            extra.append(word)
+            view.skip_ws()
         return extra
 
     async def maybe_call_alias(
@@ -167,10 +215,18 @@ class Alias(commands.Cog):
 
     async def call_alias(self, message: discord.Message, prefix: str, alias: AliasEntry):
         new_message = copy(message)
-        args = self.get_extra_args_from_alias(message, prefix, alias)
+        try:
+            args = self.get_extra_args_from_alias(message, prefix, alias)
+        except commands.BadArgument as bae:
+            return
+
+        trackform = _TrackingFormatter()
+        command = trackform.format(alias.command, *args)
 
         # noinspection PyDunderSlots
-        new_message.content = "{}{} {}".format(prefix, alias.command, args)
+        new_message.content = "{}{} {}".format(
+            prefix, command, " ".join(args[trackform.max + 1 :])
+        )
         await self.bot.process_commands(new_message)
 
     @commands.group()
@@ -228,7 +284,10 @@ class Alias(commands.Cog):
         # At this point we know we need to make a new alias
         #   and that the alias name is valid.
 
-        await self.add_alias(ctx, alias_name, command)
+        try:
+            await self.add_alias(ctx, alias_name, command)
+        except ArgParseError as e:
+            return await ctx.send(" ".join(e.args))
 
         await ctx.send(
             _("A new alias with the trigger `{name}` has been created.").format(name=alias_name)
@@ -274,7 +333,10 @@ class Alias(commands.Cog):
             return
         # endregion
 
-        await self.add_alias(ctx, alias_name, command, global_=True)
+        try:
+            await self.add_alias(ctx, alias_name, command, global_=True)
+        except ArgParseError as e:
+            return await ctx.send(" ".join(e.args))
 
         await ctx.send(
             _("A new global alias with the trigger `{name}` has been created.").format(
@@ -317,7 +379,7 @@ class Alias(commands.Cog):
             await ctx.send(_("There is no alias with the name `{name}`").format(name=alias_name))
 
     @checks.mod_or_permissions(manage_guild=True)
-    @alias.command(name="del")
+    @alias.command(name="delete", aliases=["del", "remove"])
     @commands.guild_only()
     async def _del_alias(self, ctx: commands.Context, alias_name: str):
         """Delete an existing alias on this server."""
@@ -336,7 +398,7 @@ class Alias(commands.Cog):
             await ctx.send(_("Alias with name `{name}` was not found.").format(name=alias_name))
 
     @checks.is_owner()
-    @global_.command(name="del")
+    @global_.command(name="delete", aliases=["del", "remove"])
     async def _del_global_alias(self, ctx: commands.Context, alias_name: str):
         """Delete an existing global alias."""
         aliases = await self.unloaded_global_aliases()
@@ -376,6 +438,7 @@ class Alias(commands.Cog):
         else:
             await ctx.send(box("\n".join(names), "diff"))
 
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         aliases = list(await self.unloaded_global_aliases())
         if message.guild is not None:
